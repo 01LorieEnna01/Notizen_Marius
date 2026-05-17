@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="Notizen"/>
+<meta name="theme-color" content="#0f0e0d"/>
+<title>Notizen</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Source+Serif+4:opsz,wght@8..60,300;8..60,400&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body,#root{height:100%;width:100%;overflow:hidden;background:#0f0e0d}
+body{font-family:'Georgia','Times New Roman',serif;color:#e8e2d9;-webkit-tap-highlight-color:transparent;overscroll-behavior:none}
+::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:#3a3530;border-radius:2px}
+::placeholder{color:#5a5248}
+input,textarea{font-family:'Source Serif 4',Georgia,serif;-webkit-appearance:none;appearance:none}
+input[type="date"]{-webkit-appearance:none}
+input[type="date"]::-webkit-calendar-picker-indicator{filter:invert(0.5)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.screen{position:absolute;inset:0;display:flex;flex-direction:column;overflow:hidden;animation:fadeIn .18s ease}
+.tap:active{background:#1e1b18!important}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const SB_URL = 'https://fklmwuedykgjosmhexfw.supabase.co';
+const SB_KEY = 'sb_publishable_yCT8F-KLbcn2X2cRwjYXMg_6DwqvdX8';
+const sb     = window.supabase.createClient(SB_URL, SB_KEY);
+const BUCKET = 'notizen';
+
+// ── Default categories ────────────────────────────────────────────────────────
+const DEFAULT_CATS = [
+  {id:"urlaub",      label:"Urlaub",                 icon:"✦",color:"#c8a96e",children:[{id:"urlaub-planung",label:"Planung"},{id:"urlaub-ideen",label:"Reiseideen"}]},
+  {id:"haus",        label:"Hausrenovierung",         icon:"◈",color:"#7eb8a0",children:[{id:"haus-fenster",label:"Fenster / Fechtali"},{id:"haus-wdvs",label:"WDVS"},{id:"haus-sonstiges",label:"Sonstiges"}]},
+  {id:"gutachten",   label:"Gutachten",               icon:"⊕",color:"#a09bc8",children:[{id:"gutachten-aktiv",label:"Laufende Fälle"},{id:"gutachten-methodik",label:"Methodik"},{id:"gutachten-literatur",label:"Literatur"}]},
+  {id:"arbeit",      label:"Arbeit",                  icon:"◉",color:"#c8857e",children:[{id:"arbeit-ftk",label:"Familientagesklinik"},{id:"arbeit-forschung",label:"Forschung"},{id:"arbeit-kongress",label:"DGKJP / Kongress"}]},
+  {id:"kinder",      label:"Kinder",                  icon:"◌",color:"#e0b86e",children:[{id:"kinder-hobbies",label:"Hobbies"},{id:"kinder-schule",label:"Schule"},{id:"kinder-alltag",label:"Alltag"}]},
+  {id:"philosophie", label:"Philosophie & Schreiben", icon:"∿",color:"#8ab0c8",children:[{id:"phil-buch",label:"Buchprojekt"},{id:"phil-lyrik",label:"Lyrik / Songs"},{id:"phil-nzz",label:"NZZ / Publikationen"}]},
+];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const genId    = () => Math.random().toString(36).slice(2,10)+Date.now().toString(36);
+const fmtDate  = ts => { const d=new Date(ts); return d.toLocaleDateString("de-DE",{day:"2-digit",month:"short",year:"numeric"})+" · "+d.toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"}); };
+const fmtBytes = b  => b<1024?b+" B":b<1048576?(b/1024).toFixed(0)+" KB":(b/1048576).toFixed(1)+" MB";
+const docIcon  = e  => ({pdf:"📕",doc:"📘",docx:"📘",xls:"📗",xlsx:"📗",ppt:"📙",pptx:"📙",txt:"📄",csv:"📊",zip:"🗜"}[e]||"📄");
+const isMob    = () => window.innerWidth < 768;
+
+function dlStatus(iso) {
+  if (!iso) return null;
+  const diff=new Date(iso).getTime()-Date.now(), days=Math.ceil(diff/86400000);
+  if (diff<0)   return {label:`Überfällig (${Math.abs(days)}d)`,color:"#c8574e",bg:"#2a1412"};
+  if (days===0) return {label:"Heute fällig!",color:"#e09060",bg:"#251b10"};
+  if (days<=3)  return {label:`Noch ${days} Tag${days>1?"e":""}`,color:"#c8a96e",bg:"#221e10"};
+  if (days<=14) return {label:`Noch ${days} Tage`,color:"#8ab0c8",bg:"#101820"};
+  return {label:new Date(iso).toLocaleDateString("de-DE",{day:"2-digit",month:"long",year:"numeric"}),color:"#5a5248",bg:"transparent"};
+}
+
+function compressImg(file,maxW=1400,q=0.80){
+  return new Promise((res,rej)=>{
+    const img=new Image(),url=URL.createObjectURL(file);
+    img.onload=()=>{ URL.revokeObjectURL(url); const s=Math.min(1,maxW/img.width),w=Math.round(img.width*s),h=Math.round(img.height*s); const c=document.createElement("canvas");c.width=w;c.height=h;c.getContext("2d").drawImage(img,0,0,w,h); res({dataUrl:c.toDataURL("image/jpeg",q),w,h}); };
+    img.onerror=rej; img.src=url;
+  });
+}
+function dataUrlToBlob(dataUrl){
+  const [h,d]=dataUrl.split(","),mime=h.match(/:(.*?);/)[1],bin=atob(d),arr=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
+  return new Blob([arr],{type:mime});
+}
+
+// ── DB ────────────────────────────────────────────────────────────────────────
+const DB = {
+  async loadCats(uid){ const {data}=await sb.from("notizen_categories").select("data").eq("user_id",uid).maybeSingle(); return data?.data||DEFAULT_CATS; },
+  async saveCats(uid,cats){ await sb.from("notizen_categories").upsert({user_id:uid,data:cats,updated_at:new Date().toISOString()},{onConflict:"user_id"}); },
+  async loadNotes(uid){
+    const {data,error}=await sb.from("notizen_notes").select("*,notizen_attachments(*)").eq("user_id",uid).order("updated_at",{ascending:false});
+    if(error){console.error(error);return{};}
+    const bycat={};
+    for(const r of(data||[])){
+      const n={id:r.id,catId:r.cat_id,title:r.title,body:r.body||"",deadline:r.deadline||"",createdAt:new Date(r.created_at).getTime(),updatedAt:new Date(r.updated_at).getTime(),attachments:(r.notizen_attachments||[]).map(a=>({id:a.id,name:a.name,type:a.type,ext:a.ext,size:a.size,storagePath:a.storage_path}))};
+      if(!bycat[n.catId])bycat[n.catId]=[];bycat[n.catId].push(n);
+    }
+    return bycat;
+  },
+  async saveNote(uid,note){ await sb.from("notizen_notes").upsert({id:note.id,user_id:uid,cat_id:note.catId,title:note.title,body:note.body||"",deadline:note.deadline||"",updated_at:new Date(note.updatedAt).toISOString(),created_at:new Date(note.createdAt).toISOString()},{onConflict:"id"}); },
+  async deleteNote(id){ await sb.from("notizen_notes").delete().eq("id",id); },
+  async uploadFile(uid,noteId,blob,attachId,mime,ext){ const path=`${uid}/${noteId}/${attachId}.${ext}`; const {error}=await sb.storage.from(BUCKET).upload(path,blob,{contentType:mime,upsert:true}); if(error)throw error; return path; },
+  async signedUrl(path){ const {data}=await sb.storage.from(BUCKET).createSignedUrl(path,3600); return data?.signedUrl||null; },
+  async deleteFile(path){ await sb.storage.from(BUCKET).remove([path]); },
+  async saveAttach(uid,noteId,a){ await sb.from("notizen_attachments").insert({id:a.id,note_id:noteId,user_id:uid,name:a.name,type:a.type,ext:a.ext||null,size:a.size,storage_path:a.storagePath}); },
+  async deleteAttach(id,path){ await sb.from("notizen_attachments").delete().eq("id",id); if(path)await this.deleteFile(path); },
+};
+
+// ── Reusable components (defined OUTSIDE any other component) ─────────────────
+
+function Spinner({size=22,color="#c8a96e"}){
+  return <div style={{width:size,height:size,border:"2px solid #3a3530",borderTopColor:color,borderRadius:"50%",animation:"spin .8s linear infinite",flexShrink:0}}/>;
+}
+
+// VoiceBtn is a stable top-level component — no re-mount on parent re-render
+function VoiceBtn({onText,onErr,big}){
+  const [on,setOn]=useState(false);
+  const ref=useRef(null);
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  function toggle(){
+    if(!SR){onErr("Spracheingabe: Chrome oder Safari 15+ nutzen.");return;}
+    if(on){ref.current?.stop();setOn(false);return;}
+    const r=new SR();r.lang="de-DE";r.interimResults=false;r.continuous=true;
+    r.onresult=e=>{const t=Array.from(e.results).map(x=>x[0].transcript).join(" ");onText(t);};
+    r.onerror=e=>{onErr("Mikrofon: "+e.error);setOn(false);};
+    r.onend=()=>setOn(false);
+    r.start();ref.current=r;setOn(true);
+  }
+  return(
+    <button onClick={toggle} style={{background:on?"#c8574e":"none",border:`1px solid ${on?"#c8574e":"#3a3530"}`,borderRadius:big?10:6,color:on?"#fff":"#8a8278",padding:big?"12px 18px":"7px 12px",cursor:"pointer",fontSize:big?15:12,display:"flex",alignItems:"center",gap:6,animation:on?"pulse 1.4s ease-in-out infinite":"none",flex:big?1:undefined,justifyContent:"center",fontFamily:"'Source Serif 4',Georgia,serif"}}>
+      {on?"⏹ Stopp":"🎙 Einsprechen"}
+    </button>
+  );
+}
+
+// AttachThumb: stable top-level component
+function AttachThumb({attach,onDelete}){
+  const [src,setSrc]=useState(null);
+  useEffect(()=>{DB.signedUrl(attach.storagePath).then(setSrc).catch(()=>{});},[attach.storagePath]);
+  return(
+    <div onClick={()=>src&&window.open(src,"_blank")} style={{position:"relative",borderRadius:8,overflow:"hidden",background:"#1a1715",border:"1px solid #2a2520",cursor:"pointer",aspectRatio:"4/3",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      {src?<img src={src} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}}/>:<Spinner/>}
+      <button onClick={e=>{e.stopPropagation();onDelete(attach);}} style={{position:"absolute",top:6,right:6,background:"rgba(0,0,0,0.75)",border:"none",borderRadius:"50%",width:26,height:26,color:"#fff",cursor:"pointer",fontSize:13,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+      <div style={{position:"absolute",bottom:0,left:0,right:0,background:"rgba(0,0,0,.6)",padding:"4px 8px",fontSize:10,color:"#c0b8ae"}}>{fmtBytes(attach.size)}</div>
+    </div>
+  );
+}
+
+// AttachSection: stable top-level component — receives everything as props
+function AttachSection({attachments,uploading,err,setErr,onCam,onImg,onDoc,onDelete,mobile,imgRef,docRef}){
+  const imgs=attachments.filter(a=>a.type==="image");
+  const docs=attachments.filter(a=>a.type==="doc");
+  const btnStyle=mobile
+    ?{background:"none",border:"1px solid #2a2520",borderRadius:8,color:"#8a8278",fontSize:13,padding:"10px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:5,justifyContent:"center",fontFamily:"'Source Serif 4',Georgia,serif",flex:"1 1 auto"}
+    :{background:"none",border:"1px solid #2a2520",borderRadius:6,color:"#8a8278",padding:"6px 11px",cursor:"pointer",fontSize:11,fontFamily:"'Source Serif 4',Georgia,serif"};
+  return(
+    <div style={{borderTop:"1px solid #1e1b18",paddingTop:22}}>
+      <div style={{fontSize:11,color:"#5a5248",letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:14}}>Anhänge {attachments.length>0&&`(${attachments.length})`}</div>
+      <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+        <button onClick={onCam} style={btnStyle}>📷 Kamera</button>
+        <button onClick={onImg} style={btnStyle}>🖼 Bild</button>
+        <button onClick={onDoc} style={btnStyle}>📄 Dokument</button>
+      </div>
+      <input ref={imgRef} type="file" accept="image/*" style={{display:"none"}} onChange={e=>{if(e.target.files[0])onImg(e.target.files[0],true);e.target.value="";}}/>
+      <input ref={docRef} type="file" accept=".pdf,.doc,.docx,.txt,.xls,.xlsx,.ppt,.pptx,.csv,.zip" style={{display:"none"}} onChange={e=>{if(e.target.files[0])onDoc(e.target.files[0]);e.target.value="";}}/>
+      {uploading&&<div style={{fontSize:13,color:"#8a8278",marginBottom:10,display:"flex",alignItems:"center",gap:8}}><Spinner size={16}/>Wird hochgeladen …</div>}
+      {err&&<div style={{fontSize:13,color:"#c8574e",marginBottom:10,padding:"10px 14px",background:"#1e1b18",borderRadius:8,display:"flex",gap:8}}><span style={{flex:1}}>{err}</span><button onClick={()=>setErr("")} style={{background:"none",border:"none",color:"#c8574e",cursor:"pointer",fontSize:18}}>✕</button></div>}
+      {imgs.length>0&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:10,marginBottom:docs.length>0?12:0}}>{imgs.map(a=><AttachThumb key={a.id} attach={a} onDelete={onDelete}/>)}</div>}
+      {docs.map(a=>(
+        <div key={a.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 14px",background:"#1a1715",border:"1px solid #2a2520",borderRadius:10,marginTop:8}}>
+          <span style={{fontSize:24}}>{docIcon(a.ext)}</span>
+          <div style={{flex:1,minWidth:0}}><div style={{fontSize:14,color:"#c0b8ae",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{a.name}</div><div style={{fontSize:11,color:"#4a4540"}}>{fmtBytes(a.size)}</div></div>
+          <button onClick={async()=>{const u=await DB.signedUrl(a.storagePath);if(u){const el=document.createElement("a");el.href=u;el.download=a.name;el.click();}}} style={{background:"none",border:"none",color:"#8a8278",cursor:"pointer",fontSize:16,padding:"4px 8px"}}>↓</button>
+          <button onClick={()=>onDelete(a)} style={{background:"none",border:"none",color:"#4a4540",cursor:"pointer",fontSize:18,padding:"4px 8px"}}>✕</button>
+        </div>
+      ))}
+      {attachments.length===0&&!uploading&&<div style={{fontSize:13,color:"#3a3530",fontStyle:"italic"}}>Noch keine Anhänge.</div>}
+      <div style={{marginTop:14,fontSize:10,color:"#2e2b28"}}>Fotos und Dokumente in Supabase Cloud</div>
+    </div>
+  );
+}
+
+// NoteEditor: stable top-level component — all state passed as props, no re-mount
+function NoteEditor({note,editing,eTitle,setETitle,eBody,setEBody,eDl,setEDl,showDl,setShowDl,saving,onSave,onCancel,onEdit,onDelete,onText,onErr,attachments,uploading,err,setErr,onCam,onImgFile,onDocFile,onDelAttach,mobile,imgRef,docRef,bodyRef,selColor,getCatLabel}){
+  const dls=dlStatus(note?.deadline);
+  if(!note)return null;
+  const ghBtn={background:"none",border:"1px solid #2a2520",borderRadius:6,color:"#8a8278",padding:"6px 12px",cursor:"pointer",fontSize:12,fontFamily:"'Source Serif 4',Georgia,serif"};
+  return(
+    <div style={{flex:1,overflowY:"auto",padding:mobile?"22px 20px 40px":"36px 52px 60px"}}>
+      {/* Title */}
+      {editing
+        ?<input value={eTitle} onChange={e=>setETitle(e.target.value)} placeholder="Titel …"
+            style={{width:"100%",background:"none",border:"none",borderBottom:"1px solid #2a2520",outline:"none",fontFamily:"'Playfair Display',Georgia,serif",fontSize:mobile?22:28,fontWeight:600,color:"#e8e2d9",marginBottom:20,lineHeight:1.3,padding:"0 0 12px",display:"block"}}/>
+        :<><h1 style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:mobile?23:28,fontWeight:600,color:"#e8e2d9",marginBottom:8,lineHeight:1.35}}>{note.title}</h1><div style={{fontSize:11,color:"#3a3530",marginBottom:24}}>{fmtDate(note.updatedAt)}</div></>}
+      {/* Deadline */}
+      {editing&&<div style={{marginBottom:18}}>
+        {!showDl
+          ?<button onClick={()=>setShowDl(true)} style={{...ghBtn,display:"flex",alignItems:"center",gap:5,padding:"10px 14px",fontSize:13}}>⏱ Frist setzen</button>
+          :<div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+            <span style={{fontSize:13,color:"#8a8278"}}>⏱</span>
+            <input type="date" value={eDl} onChange={e=>setEDl(e.target.value)} style={{background:"#1a1715",border:"1px solid #3a3530",borderRadius:8,color:"#c8c0b4",padding:"10px 14px",fontSize:16,outline:"none"}}/>
+            <button onClick={()=>{setShowDl(false);setEDl("");}} style={{background:"none",border:"none",color:"#5a5248",cursor:"pointer",fontSize:20}}>✕</button>
+          </div>}
+      </div>}
+      {/* Voice */}
+      {editing&&<div style={{display:"flex",gap:8,marginBottom:14}}>
+        <VoiceBtn onText={onText} onErr={onErr} big={mobile}/>
+      </div>}
+      {/* Body */}
+      {editing
+        ?<textarea ref={bodyRef} value={eBody} onChange={e=>setEBody(e.target.value)} placeholder="Hier tippen oder einsprechen …"
+            style={{width:"100%",background:mobile?"#1a1715":"none",border:mobile?"1px solid #2a2520":"none",borderRadius:mobile?10:0,outline:"none",padding:mobile?"14px":"0",fontFamily:"'Source Serif 4',Georgia,serif",fontSize:16,color:"#c8c0b4",lineHeight:1.85,resize:"none",minHeight:mobile?200:180,marginBottom:32}}/>
+        :<div style={{fontFamily:"'Source Serif 4',Georgia,serif",fontSize:mobile?16:15,color:"#c8c0b4",lineHeight:1.9,whiteSpace:"pre-wrap",marginBottom:32}}>
+            {note.body||<span style={{color:"#3a3530",fontStyle:"italic"}}>Leer — Bearbeiten tippen.</span>}
+          </div>}
+      {/* Attachments */}
+      <AttachSection
+        attachments={attachments} uploading={uploading} err={err} setErr={setErr}
+        onCam={onCam} onImg={()=>imgRef.current?.click()} onDoc={()=>docRef.current?.click()}
+        onDelete={onDelAttach} mobile={mobile} imgRef={imgRef} docRef={docRef}
+      />
+    </div>
+  );
+}
+
+// ConfirmDialog & NewCatSheet: stable top-level components
+function ConfirmDialog({msg,onYes,onNo}){
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.8)",zIndex:500,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:"#1a1715",borderRadius:14,padding:"28px 24px",maxWidth:320,width:"100%"}}>
+        <div style={{fontSize:16,color:"#e8e2d9",marginBottom:24,textAlign:"center"}}>{msg}</div>
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={onNo} style={{flex:1,background:"none",border:"1px solid #3a3530",borderRadius:10,color:"#6a6258",padding:14,cursor:"pointer",fontSize:15}}>Abbrechen</button>
+          <button onClick={onYes} style={{flex:1,background:"#c8574e",border:"none",borderRadius:10,color:"#fff",padding:14,cursor:"pointer",fontSize:15,fontWeight:700}}>Löschen</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+function NewCatSheet({cats,parentId,label,setLabel,onSave,onClose}){
+  const parent=cats.find(c=>c.id===parentId);
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.75)",zIndex:300}} onClick={onClose}>
+      <div style={{position:"absolute",bottom:0,left:0,right:0,background:"#1a1715",borderRadius:"16px 16px 0 0",padding:"28px 24px",paddingBottom:"calc(28px + env(safe-area-inset-bottom,0px))",animation:"slideUp .22s ease",maxWidth:520,margin:"0 auto"}} onClick={e=>e.stopPropagation()}>
+        <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:18,marginBottom:20,color:"#e8e2d9"}}>{parent?`Unterbereich zu „${parent.label}"`:"Neuer Lebensbereich"}</div>
+        <input autoFocus value={label} onChange={e=>setLabel(e.target.value)} onKeyDown={e=>e.key==="Enter"&&onSave()} placeholder="Name …"
+          style={{width:"100%",background:"#0f0e0d",border:"1px solid #3a3530",borderRadius:10,padding:"14px 16px",color:"#e8e2d9",fontSize:16,outline:"none",marginBottom:16}}/>
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={onClose} style={{flex:1,background:"none",border:"1px solid #3a3530",borderRadius:10,color:"#6a6258",padding:14,cursor:"pointer",fontSize:15}}>Abbrechen</button>
+          <button onClick={onSave} style={{flex:2,background:"#c8a96e",border:"none",borderRadius:10,color:"#0f0e0d",padding:14,cursor:"pointer",fontSize:15,fontWeight:700}}>Erstellen</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── DeadlineBoard: stable top-level component ─────────────────────────────────
+function DeadlineBoard({notes,cats,onOpen,mobile}){
+  const allWithDl = useMemo(()=>{
+    const res=[];
+    Object.values(notes).flat().forEach(n=>{ if(n.deadline) res.push(n); });
+    res.sort((a,b)=>new Date(a.deadline)-new Date(b.deadline));
+    return res;
+  },[notes]);
+
+  if(allWithDl.length===0) return null;
+
+  function getCatColor(id){ for(const c of cats){if(c.id===id)return c.color;for(const ch of(c.children||[]))if(ch.id===id)return c.color;}return"#888"; }
+  function getCatLabel(id){ for(const c of cats){if(c.id===id)return c.label;for(const ch of(c.children||[]))if(ch.id===id)return c.label+" · "+ch.label;}return id; }
+
+  const overdue  = allWithDl.filter(n=>new Date(n.deadline)<new Date());
+  const upcoming = allWithDl.filter(n=>new Date(n.deadline)>=new Date());
+
+  function Section({title,items,accentColor}){
+    if(!items.length) return null;
+    return(
+      <div style={{marginBottom:16}}>
+        <div style={{fontSize:9,color:accentColor,letterSpacing:"0.14em",textTransform:"uppercase",marginBottom:8,paddingLeft:2}}>{title}</div>
+        {items.map(n=>{
+          const ds=dlStatus(n.deadline);
+          return(
+            <div key={n.id} className="tap" onClick={()=>onOpen(n)}
+              style={{display:"flex",alignItems:"center",gap:12,padding:"11px 14px",background:"#161412",border:`1px solid ${ds.color}28`,borderLeft:`3px solid ${ds.color}`,borderRadius:8,marginBottom:7,cursor:"pointer"}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:mobile?14:13,color:"#e8e2d9",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{n.title||"Ohne Titel"}</div>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3,flexWrap:"wrap"}}>
+                  <span style={{fontSize:10,color:getCatColor(n.catId),letterSpacing:"0.06em"}}>{getCatLabel(n.catId)}</span>
+                  <span style={{fontSize:10,color:ds.color}}>· {ds.label}</span>
+                </div>
+              </div>
+              <span style={{fontSize:13,color:ds.color,flexShrink:0}}>›</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return(
+    <div style={{padding:mobile?"16px 18px":"20px 24px",borderBottom:"1px solid #2a2520",background:"#0d0c0b"}}>
+      <div style={{fontSize:10,color:"#5a5248",letterSpacing:"0.14em",textTransform:"uppercase",marginBottom:12}}>⏱ Fristen & Termine</div>
+      <Section title="Überfällig" items={overdue} accentColor="#c8574e"/>
+      <Section title="Demnächst" items={upcoming} accentColor="#8ab0c8"/>
+    </div>
+  );
+}
+
+// LoginScreen — uses 6-digit OTP code, no redirect needed → works in Safari PWA
+function LoginScreen(){
+  const [email,setEmail]   = useState("");
+  const [code,setCode]     = useState("");
+  const [step,setStep]     = useState("email"); // email | code
+  const [busy,setBusy]     = useState(false);
+  const [err,setErr]       = useState("");
+
+  async function sendCode(){
+    if(!email.trim())return;
+    setBusy(true); setErr("");
+    const {error}=await sb.auth.signInWithOtp({
+      email:email.trim(),
+      options:{ shouldCreateUser:true }
+    });
+    setBusy(false);
+    if(error){setErr(error.message);return;}
+    setStep("code");
+  }
+
+  async function verifyCode(){
+    if(code.length<6)return;
+    setBusy(true); setErr("");
+    const {error}=await sb.auth.verifyOtp({
+      email:email.trim(),
+      token:code.trim(),
+      type:"email"
+    });
+    setBusy(false);
+    if(error){setErr("Ungültiger Code — bitte prüfen."); setCode(""); return;}
+    // success: onAuthStateChange fires automatically
+  }
+
+  const inp16={width:"100%",background:"#1a1715",border:"1px solid #3a3530",borderRadius:10,padding:"14px 16px",color:"#e8e2d9",fontSize:16,outline:"none"};
+
+  return(
+    <div style={{position:"fixed",inset:0,background:"#0f0e0d",display:"flex",alignItems:"center",justifyContent:"center",padding:28}}>
+      <div style={{maxWidth:360,width:"100%"}}>
+        <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:36,fontWeight:600,color:"#e8e2d9",textAlign:"center",marginBottom:6}}>Notizen</div>
+        <div style={{fontSize:10,color:"#5a5248",letterSpacing:"0.12em",textTransform:"uppercase",textAlign:"center",marginBottom:52}}>Lebensbereiche</div>
+
+        {step==="email"?(<>
+          <div style={{fontSize:13,color:"#8a8278",marginBottom:18,textAlign:"center"}}>Anmeldung per E-Mail-Code — kein Passwort nötig</div>
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&sendCode()} placeholder="deine@email.de" style={{...inp16,marginBottom:12}}/>
+          {err&&<div style={{fontSize:12,color:"#c8574e",marginBottom:12}}>{err}</div>}
+          <button onClick={sendCode} disabled={busy} style={{width:"100%",background:"#c8a96e",border:"none",borderRadius:10,color:"#0f0e0d",padding:14,fontSize:15,cursor:"pointer",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
+            {busy&&<Spinner size={18} color="#0f0e0d"/>}{busy?"Senden …":"Code senden"}
+          </button>
+        </>):(<>
+          <div style={{textAlign:"center",marginBottom:24}}>
+            <div style={{fontSize:32,marginBottom:12}}>📬</div>
+            <div style={{fontSize:15,color:"#e8e2d9",marginBottom:6}}>Code gesendet an</div>
+            <div style={{fontSize:13,color:"#c8a96e",marginBottom:4}}>{email}</div>
+            <div style={{fontSize:12,color:"#5a5248"}}>6-stelligen Code aus der E-Mail eingeben</div>
+          </div>
+          <input
+            type="number" inputMode="numeric" pattern="[0-9]*"
+            value={code} onChange={e=>setCode(e.target.value.slice(0,6))}
+            onKeyDown={e=>e.key==="Enter"&&verifyCode()}
+            placeholder="123456"
+            style={{...inp16,textAlign:"center",fontSize:28,letterSpacing:"0.3em",marginBottom:12}}
+          />
+          {err&&<div style={{fontSize:12,color:"#c8574e",marginBottom:12,textAlign:"center"}}>{err}</div>}
+          <button onClick={verifyCode} disabled={busy||code.length<6} style={{width:"100%",background:code.length>=6?"#c8a96e":"#2a2520",border:"none",borderRadius:10,color:code.length>=6?"#0f0e0d":"#5a5248",padding:14,fontSize:15,cursor:code.length>=6?"pointer":"default",fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",gap:10,transition:"all .2s"}}>
+            {busy&&<Spinner size={18} color="#0f0e0d"/>}{busy?"Prüfe Code …":"Einloggen"}
+          </button>
+          <button onClick={()=>{setStep("email");setCode("");setErr("");}} style={{width:"100%",background:"none",border:"none",color:"#5a5248",padding:"12px",fontSize:13,cursor:"pointer",marginTop:8}}>
+            ← Andere E-Mail
+          </button>
+        </>)}
+      </div>
+    </div>
+  );
+}
+
+// ── MAIN APP ──────────────────────────────────────────────────────────────────
+function MainApp({user}){
+  const [cats,setCats]           = useState(DEFAULT_CATS);
+  const [notes,setNotes]         = useState({});
+  const [dataLoading,setDataLoading] = useState(true);
+  const [mobile,setMobile]       = useState(isMob);
+  const [screen,setScreen]       = useState("cats");
+  const [selId,setSelId]         = useState(null);
+  const [note,setNote]           = useState(null);
+  const [editing,setEditing]     = useState(false);
+  const [eTitle,setETitle]       = useState("");
+  const [eBody,setEBody]         = useState("");
+  const [eDl,setEDl]             = useState("");
+  const [showDl,setShowDl]       = useState(false);
+  const [expanded,setExpanded]   = useState({});
+  const [sidebarOpen,setSidebarOpen] = useState(true);
+  const [search,setSearch]       = useState("");
+  const [filterOD,setFilterOD]   = useState(false);
+  const [uploading,setUploading] = useState(false);
+  const [err,setErr]             = useState("");
+  const [saving,setSaving]       = useState(false);
+  const [camOpen,setCamOpen]     = useState(false);
+  const [camStream,setCamStream] = useState(null);
+  const [newCatModal,setNewCatModal]   = useState(false);
+  const [newCatParent,setNewCatParent] = useState(null);
+  const [newCatLabel,setNewCatLabel]   = useState("");
+  const [confirmDel,setConfirmDel]     = useState(null);
+  const bodyRef=useRef(), imgRef=useRef(), docRef=useRef(), vidRef=useRef();
+
+  useEffect(()=>{ const fn=()=>setMobile(isMob()); window.addEventListener("resize",fn); return()=>window.removeEventListener("resize",fn); },[]);
+  useEffect(()=>{
+    Promise.all([DB.loadCats(user.id),DB.loadNotes(user.id)]).then(([c,n])=>{ setCats(c); setNotes(n); setDataLoading(false); }).catch(e=>{ console.error(e); setDataLoading(false); });
+  },[user.id]);
+  useEffect(()=>{ if(!camOpen&&camStream){ camStream.getTracks().forEach(t=>t.stop()); setCamStream(null); } },[camOpen,camStream]);
+
+  const getCatColor = useCallback(id=>{ for(const c of cats){ if(c.id===id)return c.color; for(const ch of(c.children||[]))if(ch.id===id)return c.color; } return"#888"; },[cats]);
+  const getCatLabel = useCallback(id=>{ for(const c of cats){ if(c.id===id)return c.label; for(const ch of(c.children||[]))if(ch.id===id)return c.label+" · "+ch.label; } return id; },[cats]);
+  const selColor = selId?getCatColor(selId):"#c8a96e";
+
+  const overdueAll = useMemo(()=>Object.values(notes).flat().filter(n=>n.deadline&&new Date(n.deadline)<new Date()),[notes]);
+  const displayNotes = useMemo(()=>
+    filterOD ? overdueAll
+    : search.trim() ? Object.entries(notes).flatMap(([cId,ns])=>ns.filter(n=>n.title.toLowerCase().includes(search.toLowerCase())||(n.body||"").toLowerCase().includes(search.toLowerCase())).map(n=>({...n,catId:cId})))
+    : (selId?notes[selId]||[]:[]
+  ),[filterOD,overdueAll,search,notes,selId]);
+
+  const attachments = note?.attachments||[];
+
+  function patchNotesState(updated){
+    setNotes(p=>({...p,[updated.catId]:(p[updated.catId]||[]).map(n=>n.id===updated.id?updated:n)}));
+  }
+
+  function openNote(n){ setNote(n); setEditing(false); setETitle(n.title); setEBody(n.body||""); setEDl(n.deadline||""); setShowDl(!!n.deadline); setErr(""); if(mobile)setScreen("editor"); }
+
+  async function newNote(){
+    const catId=selId||"arbeit";
+    const n={id:genId(),title:"Neue Notiz",body:"",deadline:"",attachments:[],createdAt:Date.now(),updatedAt:Date.now(),catId};
+    setNotes(p=>({...p,[catId]:[n,...(p[catId]||[])]}));
+    setNote(n); setETitle(n.title); setEBody(""); setEDl(""); setEditing(true); setShowDl(false);
+    if(mobile)setScreen("editor");
+    await DB.saveNote(user.id,n);
+    setTimeout(()=>bodyRef.current?.focus(),120);
+  }
+
+  async function saveNote(){
+    if(!note)return; setSaving(true);
+    const u={...note,title:eTitle||"Ohne Titel",body:eBody,deadline:showDl?eDl:"",updatedAt:Date.now()};
+    setNote(u); patchNotesState(u); setEditing(false);
+    await DB.saveNote(user.id,u); setSaving(false);
+  }
+
+  function cancelEdit(){ setEditing(false); setETitle(note.title); setEBody(note.body||""); setEDl(note.deadline||""); setShowDl(!!note.deadline); }
+
+  function confirmDelete(){
+    setConfirmDel({msg:"Notiz löschen?",onYes:async()=>{
+      (note.attachments||[]).forEach(a=>DB.deleteAttach(a.id,a.storagePath));
+      setNotes(p=>({...p,[note.catId]:(p[note.catId]||[]).filter(n=>n.id!==note.id)}));
+      setNote(null); setEditing(false); if(mobile)setScreen("list");
+      await DB.deleteNote(note.id); setConfirmDel(null);
+    }});
+  }
+
+  async function doAddAttach(blob,name,isImage,ext,mime){
+    if(!note)return;
+    setUploading(true); setErr("");
+    try{
+      const attachId=genId();
+      const storagePath=await DB.uploadFile(user.id,note.id,blob,attachId,mime,ext);
+      const a={id:attachId,name,type:isImage?"image":"doc",ext,size:blob.size,storagePath};
+      await DB.saveAttach(user.id,note.id,a);
+      const updated={...note,attachments:[...(note.attachments||[]),a],updatedAt:Date.now()};
+      setNote(updated); patchNotesState(updated);
+    }catch(e){ setErr("Upload-Fehler: "+e.message); }
+    setUploading(false);
+  }
+
+  async function handleImgFile(file){
+    if(!file?.type.startsWith("image/"))return;
+    const {dataUrl}=await compressImg(file);
+    const blob=dataUrlToBlob(dataUrl);
+    await doAddAttach(blob,file.name,true,"jpg","image/jpeg");
+  }
+
+  async function handleDocFile(file){
+    if(!file)return;
+    const ext=file.name.split(".").pop().toLowerCase();
+    await doAddAttach(file,file.name,false,ext,file.type||"application/octet-stream");
+  }
+
+  async function handleCamClick(){
+    try{ const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}}); setCamStream(s); setCamOpen(true); setTimeout(()=>{ if(vidRef.current)vidRef.current.srcObject=s; },100); }
+    catch(e){ setErr("Kamera: "+e.message); }
+  }
+
+  async function capturePhoto(){
+    const v=vidRef.current; if(!v)return;
+    const c=document.createElement("canvas"); c.width=v.videoWidth; c.height=v.videoHeight; c.getContext("2d").drawImage(v,0,0);
+    const dataUrl=c.toDataURL("image/jpeg",.85);
+    setCamOpen(false);
+    const blob=dataUrlToBlob(dataUrl);
+    await doAddAttach(blob,`Foto_${Date.now()}.jpg`,true,"jpg","image/jpeg");
+  }
+
+  async function delAttach(a){
+    const updated={...note,attachments:(note.attachments||[]).filter(x=>x.id!==a.id),updatedAt:Date.now()};
+    setNote(updated); patchNotesState(updated);
+    await DB.deleteAttach(a.id,a.storagePath);
+  }
+
+  async function addCat(parentId,label){
+    if(!label.trim())return;
+    const id=label.toLowerCase().replace(/\s+/g,"-")+"-"+genId().slice(0,4);
+    const newCats=parentId?cats.map(c=>c.id===parentId?{...c,children:[...(c.children||[]),{id,label:label.trim()}]}:c)
+      :[...cats,{id,label:label.trim(),icon:["◆","◇","○","□","△"][Math.floor(Math.random()*5)],color:`hsl(${Math.floor(Math.random()*360)},45%,65%)`,children:[]}];
+    setCats(newCats); setNewCatModal(false); setNewCatLabel("");
+    await DB.saveCats(user.id,newCats);
+  }
+
+  async function deleteCat(catId){
+    // Collect all note IDs in this category (and subcategories if parent)
+    const cat = cats.find(c=>c.id===catId);
+    const allCatIds = cat ? [catId, ...(cat.children||[]).map(c=>c.id)] : [catId];
+    const affectedNotes = allCatIds.flatMap(id=>notes[id]||[]);
+    const noteCount = affectedNotes.length;
+
+    setConfirmDel({msg:`Bereich löschen?${noteCount>0?` (${noteCount} Notiz${noteCount>1?"en":""} werden ebenfalls gelöscht)`:""}`, onYes:async()=>{
+      // Delete all attachments and notes
+      for(const n of affectedNotes){
+        (n.attachments||[]).forEach(a=>DB.deleteAttach(a.id,a.storagePath));
+        await DB.deleteNote(n.id);
+      }
+      // Remove from notes state
+      const newNotes={...notes};
+      allCatIds.forEach(id=>delete newNotes[id]);
+      setNotes(newNotes);
+      // Remove from cats
+      const newCats = cat
+        ? cats.filter(c=>c.id!==catId)  // remove parent + its children
+        : cats.map(c=>({...c,children:(c.children||[]).filter(ch=>ch.id!==catId)})); // remove child only
+      setCats(newCats);
+      await DB.saveCats(user.id,newCats);
+      if(selId&&allCatIds.includes(selId)){ setSelId(null); setNote(null); if(mobile)setScreen("cats"); }
+      setConfirmDel(null);
+    }});
+  }
+
+  const signOut=()=>sb.auth.signOut();
+
+  // Callbacks passed to NoteEditor — stable references prevent re-renders
+  const onText = useCallback(t=>setEBody(p=>p+(p.trim()?" ":"")+t),[]);
+  const onErr  = useCallback(setErr,[]);
+
+  if(dataLoading)return(
+    <div style={{position:"fixed",inset:0,background:"#0f0e0d",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:20}}>
+      <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:24,color:"#3a3530"}}>Notizen</div><Spinner/>
+    </div>
+  );
+
+  const dls=dlStatus(note?.deadline);
+  const ghBtn={background:"none",border:"1px solid #2a2520",borderRadius:6,color:"#8a8278",padding:"6px 12px",cursor:"pointer",fontSize:12,fontFamily:"'Source Serif 4',Georgia,serif"};
+
+  // ════════════ MOBILE ════════════
+  if(mobile){
+    const NAV=56;
+    const hdr={padding:"0 18px",height:56,paddingTop:"env(safe-area-inset-top,0px)",display:"flex",alignItems:"center",gap:12,borderBottom:"1px solid #2a2520",background:"#0f0e0d",flexShrink:0};
+    const back={background:"none",border:"none",color:"#8a8278",fontSize:24,cursor:"pointer",padding:"6px 10px 6px 0",lineHeight:1};
+    const inp={width:"100%",background:"#1a1715",border:"1px solid #2a2520",borderRadius:10,padding:"13px 14px",color:"#e8e2d9",fontSize:16,outline:"none"};
+
+    return(
+      <div style={{position:"fixed",inset:0,background:"#0f0e0d",overflow:"hidden"}}>
+
+        {/* CATEGORIES */}
+        {screen==="cats"&&<div className="screen" style={{paddingBottom:NAV}}>
+          <div style={hdr}>
+            <div style={{flex:1}}><div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:20,fontWeight:600}}>Notizen</div><div style={{fontSize:10,color:"#5a5248",letterSpacing:"0.1em",textTransform:"uppercase"}}>Lebensbereiche</div></div>
+            {overdueAll.length>0&&<div onClick={()=>{setFilterOD(true);setScreen("list");}} style={{background:"#2a1412",border:"1px solid #c8574e40",borderRadius:8,padding:"6px 12px",cursor:"pointer",marginRight:8}}><span style={{fontSize:12,color:"#c8574e"}}>⏱ {overdueAll.length}</span></div>}
+            <button onClick={signOut} style={{background:"none",border:"none",color:"#3a3530",cursor:"pointer",fontSize:20,padding:4}}>⎋</button>
+          </div>
+          <div style={{padding:"14px 18px",borderBottom:"1px solid #1e1b18",flexShrink:0}}>
+            <input value={search} onChange={e=>{setSearch(e.target.value);if(e.target.value.trim()){setSelId(null);setScreen("list");}}} placeholder="Notizen suchen …" style={inp}/>
+          </div>
+          <div style={{flex:1,overflowY:"auto"}}>
+            <DeadlineBoard notes={notes} cats={cats} onOpen={n=>{openNote(n);}} mobile={true}/>
+            {cats.map(cat=>(
+              <div key={cat.id}>
+                <div className="tap" onClick={()=>{setSelId(cat.id);setFilterOD(false);setSearch("");setExpanded(p=>({...p,[cat.id]:!p[cat.id]}));setScreen("list");}}
+                  style={{display:"flex",alignItems:"center",padding:"15px 18px",cursor:"pointer",borderBottom:"1px solid #1e1b18",gap:14}}>
+                  <div style={{width:42,height:42,borderRadius:10,background:cat.color+"22",border:`1px solid ${cat.color}44`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,color:cat.color,flexShrink:0}}>{cat.icon}</div>
+                  <div style={{flex:1,minWidth:0}}><div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:16,color:"#e8e2d9"}}>{cat.label}</div><div style={{fontSize:12,color:"#5a5248",marginTop:2}}>{(notes[cat.id]||[]).length+(cat.children||[]).reduce((s,c)=>s+(notes[c.id]||[]).length,0)} Notizen</div></div>
+                  <button onClick={e=>{e.stopPropagation();deleteCat(cat.id);}} style={{background:"none",border:"none",color:"#3a3530",cursor:"pointer",fontSize:16,padding:"4px 8px",flexShrink:0}}>🗑</button>
+                  <span style={{fontSize:16,color:"#3a3530"}}>›</span>
+                </div>
+                {(cat.children||[]).map(ch=>(
+                  <div key={ch.id} className="tap" onClick={()=>{setSelId(ch.id);setFilterOD(false);setSearch("");setScreen("list");}}
+                    style={{display:"flex",alignItems:"center",padding:"12px 18px 12px 74px",cursor:"pointer",borderBottom:"1px solid #1a1714",background:"#0c0b0a",gap:10}}>
+                    <span style={{fontSize:8,color:cat.color}}>◦</span>
+                    <div style={{flex:1}}><div style={{fontSize:15,color:"#b0a89e"}}>{ch.label}</div><div style={{fontSize:11,color:"#4a4540"}}>{(notes[ch.id]||[]).length} Notizen</div></div>
+                    <button onClick={e=>{e.stopPropagation();deleteCat(ch.id);}} style={{background:"none",border:"none",color:"#3a3530",cursor:"pointer",fontSize:14,padding:"4px 8px",flexShrink:0}}>🗑</button>
+                    <span style={{fontSize:14,color:"#3a3530"}}>›</span>
+                  </div>
+                ))}
+                <div className="tap" onClick={()=>{setNewCatParent(cat.id);setNewCatModal(true);}} style={{padding:"10px 18px 10px 74px",borderBottom:"1px solid #1a1714",cursor:"pointer"}}>
+                  <span style={{fontSize:12,color:"#3a3530"}}>+ Unterbereich …</span>
+                </div>
+              </div>
+            ))}
+            <div className="tap" onClick={()=>{setNewCatParent(null);setNewCatModal(true);}} style={{padding:"16px 18px",cursor:"pointer",display:"flex",alignItems:"center",gap:14,borderBottom:"1px solid #1e1b18"}}>
+              <div style={{width:42,height:42,borderRadius:10,background:"#1a1715",border:"1px solid #2a2520",display:"flex",alignItems:"center",justifyContent:"center",fontSize:24,color:"#3a3530"}}>+</div>
+              <span style={{fontSize:15,color:"#4a4540"}}>Neuer Bereich …</span>
+            </div>
+          </div>
+        </div>}
+
+        {/* LIST */}
+        {screen==="list"&&<div className="screen" style={{paddingBottom:NAV}}>
+          <div style={hdr}>
+            <button onClick={()=>{setScreen("cats");setFilterOD(false);}} style={back}>‹</button>
+            <div onClick={()=>{setScreen("cats");setFilterOD(false);}} style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:17,fontWeight:600,color:filterOD?"#c8574e":selColor,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer"}}>
+              {filterOD?"Überfällig":search?"Suche":selId?getCatLabel(selId):"Alle"}
+            </div>
+            {selId&&!filterOD&&<button onClick={newNote} style={{background:selColor,border:"none",borderRadius:9,color:"#0f0e0d",fontSize:24,width:38,height:38,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,flexShrink:0}}>+</button>}
+          </div>
+          {!filterOD&&<div style={{padding:"10px 18px",borderBottom:"1px solid #1e1b18",flexShrink:0}}>
+            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Suchen …" style={{...inp,fontSize:15}}/>
+          </div>}
+          <div style={{flex:1,overflowY:"auto"}}>
+            {displayNotes.length===0&&<div style={{padding:"48px 24px",color:"#3a3530",fontSize:14,textAlign:"center",lineHeight:2}}>Keine Notizen.<br/>Oben + tippen.</div>}
+            {displayNotes.map(n=>{const ds=dlStatus(n.deadline);return(
+              <div key={n.id} className="tap" onClick={()=>openNote(n)} style={{padding:"16px 18px",borderBottom:"1px solid #1e1b18",cursor:"pointer"}}>
+                <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:16,color:"#e8e2d9",marginBottom:4,fontWeight:500}}>{n.title||"Ohne Titel"}</div>
+                {(search||filterOD)&&<div style={{fontSize:10,color:getCatColor(n.catId),marginBottom:4,letterSpacing:"0.08em",textTransform:"uppercase"}}>{getCatLabel(n.catId)}</div>}
+                <div style={{fontSize:13,color:"#5a5248",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginBottom:5}}>{(n.body||"").slice(0,70)||"—"}</div>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                  <div style={{fontSize:11,color:"#3a3530"}}>{fmtDate(n.updatedAt)}</div>
+                  {(n.attachments||[]).length>0&&<div style={{fontSize:11,color:"#4a4540"}}>· {(n.attachments||[]).length}×📎</div>}
+                  {ds&&<div style={{fontSize:11,color:ds.color}}>· ⏱ {ds.label}</div>}
+                </div>
+              </div>
+            );})}
+          </div>
+        </div>}
+
+        {/* EDITOR */}
+        {screen==="editor"&&note&&<div className="screen" style={{paddingBottom:NAV}}>
+          <div style={hdr}>
+            <button onClick={()=>{setScreen("list");setEditing(false);}} style={back}>‹</button>
+            <div onClick={()=>{setScreen("list");setEditing(false);}} style={{fontSize:10,color:selColor,letterSpacing:"0.12em",textTransform:"uppercase",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer"}}>{getCatLabel(note.catId)}</div>
+            {editing
+              ?<><button onClick={saveNote} disabled={saving} style={{background:selColor,border:"none",borderRadius:8,color:"#0f0e0d",padding:"8px 16px",fontSize:14,cursor:"pointer",fontWeight:700,display:"flex",alignItems:"center",gap:6}}>{saving&&<Spinner size={14} color="#0f0e0d"/>}Sichern</button>
+                <button onClick={cancelEdit} style={{...ghBtn,marginLeft:6}}>✕</button></>
+              :<><button onClick={()=>setEditing(true)} style={ghBtn}>Bearbeiten</button>
+                <button onClick={confirmDelete} style={{background:"none",border:"none",color:"#6a3a36",fontSize:24,cursor:"pointer",padding:"4px 0 4px 10px"}}>🗑</button></>}
+          </div>
+          {!editing&&note.deadline&&<div style={{padding:"10px 18px",borderBottom:"1px solid #1e1b18",background:dls?.bg||"transparent",flexShrink:0}}>
+            <span style={{fontSize:13,color:dls?.color||"#8a8278"}}>⏱ {new Date(note.deadline).toLocaleDateString("de-DE",{day:"2-digit",month:"long",year:"numeric"})} — {dls?.label}</span>
+          </div>}
+          <NoteEditor
+            note={note} editing={editing}
+            eTitle={eTitle} setETitle={setETitle}
+            eBody={eBody} setEBody={setEBody}
+            eDl={eDl} setEDl={setEDl}
+            showDl={showDl} setShowDl={setShowDl}
+            saving={saving} onSave={saveNote} onCancel={cancelEdit}
+            onEdit={()=>setEditing(true)} onDelete={confirmDelete}
+            onText={onText} onErr={onErr}
+            attachments={attachments} uploading={uploading} err={err} setErr={setErr}
+            onCam={handleCamClick} onImgFile={handleImgFile} onDocFile={handleDocFile} onDelAttach={delAttach}
+            mobile={true} imgRef={imgRef} docRef={docRef} bodyRef={bodyRef}
+            selColor={selColor} getCatLabel={getCatLabel}
+          />
+        </div>}
+
+        {/* BOTTOM NAV */}
+        <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#161412",borderTop:"1px solid #2a2520",display:"flex",alignItems:"stretch",paddingBottom:"env(safe-area-inset-bottom,0px)",zIndex:50,height:NAV}}>
+          {[["◈","Bereiche","cats",()=>setScreen("cats")],selId&&["☰","Liste","list",()=>setScreen("list")],note&&["✎","Notiz","editor",()=>setScreen("editor")]].filter(Boolean).map(([icon,label,sc,fn])=>(
+            <button key={sc} onClick={fn} style={{flex:1,background:"none",border:"none",cursor:"pointer",color:screen===sc?selColor:"#5a5248",fontSize:10,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,padding:"6px 0"}}>
+              <span style={{fontSize:22}}>{icon}</span>{label}
+            </button>
+          ))}
+          {selId&&!filterOD&&<button onClick={newNote} style={{flex:1,background:selColor,border:"none",cursor:"pointer",color:"#0f0e0d",fontSize:10,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:2,padding:"6px 0",fontWeight:700}}>
+            <span style={{fontSize:26,lineHeight:1}}>+</span>Neu
+          </button>}
+        </div>
+
+        {camOpen&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.96)",zIndex:300,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:20}}>
+          <video ref={vidRef} autoPlay playsInline style={{maxWidth:500,width:"94vw",borderRadius:12,background:"#1a1715"}}/>
+          <div style={{display:"flex",gap:14}}>
+            <button onClick={capturePhoto} style={{background:"#c8a96e",border:"none",borderRadius:12,color:"#0f0e0d",padding:"14px 32px",fontSize:16,cursor:"pointer",fontWeight:700}}>📸 Aufnehmen</button>
+            <button onClick={()=>setCamOpen(false)} style={{background:"none",border:"1px solid #3a3530",borderRadius:12,color:"#8a8278",padding:"14px 22px",fontSize:16,cursor:"pointer"}}>Abbrechen</button>
+          </div>
+        </div>}
+        {newCatModal&&<NewCatSheet cats={cats} parentId={newCatParent} label={newCatLabel} setLabel={setNewCatLabel} onSave={()=>addCat(newCatParent,newCatLabel)} onClose={()=>setNewCatModal(false)}/>}
+        {confirmDel&&<ConfirmDialog msg={confirmDel.msg} onYes={confirmDel.onYes} onNo={()=>setConfirmDel(null)}/>}
+      </div>
+    );
+  }
+
+  // ════════════ DESKTOP ════════════
+  return(
+    <div style={{display:"flex",height:"100vh",background:"#0f0e0d",overflow:"hidden"}}>
+      <aside style={{width:sidebarOpen?240:0,minWidth:sidebarOpen?240:0,background:"#161412",borderRight:"1px solid #2a2520",display:"flex",flexDirection:"column",overflow:"hidden",transition:"width .25s,min-width .25s"}}>
+        <div style={{padding:"26px 20px 14px",borderBottom:"1px solid #2a2520",flexShrink:0}}>
+          <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:18,fontWeight:600}}>Notizen</div>
+          <div style={{fontSize:10,color:"#5a5248",letterSpacing:"0.12em",textTransform:"uppercase",marginTop:2}}>Lebensbereiche</div>
+        </div>
+        <div style={{padding:"10px 14px",borderBottom:"1px solid #2a2520",flexShrink:0}}>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Suchen …" style={{width:"100%",background:"#1e1b18",border:"1px solid #2a2520",borderRadius:6,padding:"7px 10px",color:"#e8e2d9",fontSize:12,outline:"none"}}/>
+        </div>
+        {overdueAll.length>0&&<div onClick={()=>setFilterOD(o=>!o)} style={{padding:"8px 16px",cursor:"pointer",borderBottom:"1px solid #2a2520",background:filterOD?"#2a1412":"transparent",flexShrink:0}}>
+          <span style={{fontSize:11,color:"#c8574e"}}>⏱ {overdueAll.length} überfällig</span>
+        </div>}
+        <nav style={{flex:1,overflowY:"auto",padding:"8px 0"}}>
+          {cats.map(cat=>(
+            <div key={cat.id}>
+              <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",cursor:"pointer",background:selId===cat.id?"#1e1b18":"transparent",borderLeft:selId===cat.id?`2px solid ${cat.color}`:"2px solid transparent"}}
+                onClick={()=>{setSelId(cat.id);setExpanded(p=>({...p,[cat.id]:!p[cat.id]}));setNote(null);setSearch("");setFilterOD(false);}}>
+                <span style={{color:cat.color,fontSize:13}}>{cat.icon}</span>
+                <span style={{flex:1,fontSize:12.5,fontWeight:500,fontFamily:"'Playfair Display',Georgia,serif",color:selId===cat.id?"#e8e2d9":"#b0a89e",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{cat.label}</span>
+                <button onClick={e=>{e.stopPropagation();deleteCat(cat.id);}} style={{background:"none",border:"none",color:"#2a2520",cursor:"pointer",fontSize:12,padding:"2px 4px",flexShrink:0,lineHeight:1}} title="Bereich löschen">🗑</button>
+                <span style={{fontSize:9,color:"#5a5248",transform:expanded[cat.id]?"rotate(90deg)":"rotate(0)",transition:"transform .2s"}}>▶</span>
+              </div>
+              {expanded[cat.id]&&(cat.children||[]).map(ch=>(
+                <div key={ch.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 14px 6px 36px",cursor:"pointer",background:selId===ch.id?"#1e1b18":"transparent",borderLeft:selId===ch.id?`2px solid ${cat.color}`:"2px solid transparent"}}
+                  onClick={()=>{setSelId(ch.id);setNote(null);setSearch("");setFilterOD(false);}}>
+                  <span style={{fontSize:8,color:cat.color,opacity:.6}}>◦</span>
+                  <span style={{flex:1,fontSize:11.5,color:selId===ch.id?"#e8e2d9":"#8a8278",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{ch.label}</span><button onClick={e=>{e.stopPropagation();deleteCat(ch.id);}} style={{background:"none",border:"none",color:"#2a2520",cursor:"pointer",fontSize:11,padding:"2px 4px",flexShrink:0,lineHeight:1}}>🗑</button>
+                </div>
+              ))}
+              {expanded[cat.id]&&<div style={{padding:"4px 14px 4px 36px",cursor:"pointer"}} onClick={()=>{setNewCatParent(cat.id);setNewCatModal(true);}}><span style={{fontSize:10,color:"#3a3530"}}>+ Unterbereich</span></div>}
+            </div>
+          ))}
+          <div style={{padding:"10px 14px",cursor:"pointer",marginTop:4}} onClick={()=>{setNewCatParent(null);setNewCatModal(true);}}>
+            <span style={{fontSize:11,color:"#4a4540"}}>+ Neuer Bereich</span>
+          </div>
+        </nav>
+        <div style={{padding:"12px 16px",borderTop:"1px solid #1e1b18",cursor:"pointer"}} onClick={signOut}>
+          <span style={{fontSize:11,color:"#3a3530"}}>⎋ Abmelden</span>
+        </div>
+      </aside>
+
+      <div style={{width:268,minWidth:268,background:"#141210",borderRight:"1px solid #2a2520",display:"flex",flexDirection:"column"}}>
+        <div style={{padding:"18px 16px 14px",borderBottom:"1px solid #2a2520",display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+          <button onClick={()=>setSidebarOpen(o=>!o)} style={{background:"none",border:"none",cursor:"pointer",color:"#5a5248",fontSize:16,padding:0}}>☰</button>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:14,fontWeight:600,color:filterOD?"#c8574e":selId?selColor:"#6a6258",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+              {filterOD?"Überfällig":search?"Suche":selId?getCatLabel(selId):"Bereich wählen"}
+            </div>
+            <div style={{fontSize:10,color:"#4a4540",marginTop:1}}>{displayNotes.length} Notizen</div>
+          </div>
+          {selId&&!filterOD&&<button onClick={newNote} style={{background:selColor,border:"none",borderRadius:5,color:"#0f0e0d",fontSize:16,width:26,height:26,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,flexShrink:0}}>+</button>}
+        </div>
+        <div style={{flex:1,overflowY:"auto"}}>
+          {displayNotes.length===0&&<div style={{padding:"32px 16px",color:"#3a3530",fontSize:12,textAlign:"center",lineHeight:1.8}}>{selId||filterOD?"Keine Notizen.":"Einen Bereich\nauswählen."}</div>}
+          {displayNotes.map(n=>{const ds=dlStatus(n.deadline);const isA=note?.id===n.id;return(
+            <div key={n.id} className="tap" onClick={()=>openNote(n)} style={{padding:"13px 16px",borderBottom:"1px solid #1e1b18",cursor:"pointer",background:isA?"#1e1b18":"transparent",borderLeft:isA?`2px solid ${getCatColor(n.catId)}`:"2px solid transparent"}}>
+              <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:13,fontWeight:500,color:isA?"#e8e2d9":"#c0b8ae",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginBottom:3}}>{n.title||"Ohne Titel"}</div>
+              {(search||filterOD)&&<div style={{fontSize:9,color:getCatColor(n.catId),marginBottom:3,letterSpacing:"0.08em",textTransform:"uppercase"}}>{getCatLabel(n.catId)}</div>}
+              <div style={{fontSize:11,color:"#5a5248",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginBottom:4}}>{(n.body||"").slice(0,55)||"—"}</div>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                <div style={{fontSize:9,color:"#3a3530"}}>{fmtDate(n.updatedAt)}</div>
+                {(n.attachments||[]).length>0&&<div style={{fontSize:9,color:"#4a4540"}}>· {(n.attachments||[]).length}×📎</div>}
+                {ds&&<div style={{fontSize:9,color:ds.color}}>· ⏱ {ds.label}</div>}
+              </div>
+            </div>
+          );})}
+        </div>
+      </div>
+
+      <main style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+        {note?(<>
+          <div style={{padding:"14px 28px",borderBottom:"1px solid #2a2520",display:"flex",alignItems:"center",gap:10,background:"#0f0e0d",flexShrink:0}}>
+            <div style={{flex:1,fontSize:9,color:selColor,letterSpacing:"0.14em",textTransform:"uppercase"}}>{getCatLabel(note.catId)}</div>
+            {editing
+              ?<><button onClick={saveNote} disabled={saving} style={{background:selColor,color:"#0f0e0d",border:"none",borderRadius:5,padding:"6px 16px",fontSize:12,cursor:"pointer",fontWeight:600,display:"flex",alignItems:"center",gap:6}}>{saving&&<Spinner size={14} color="#0f0e0d"/>}Speichern</button>
+                <button onClick={cancelEdit} style={ghBtn}>Abbrechen</button></>
+              :<><button onClick={()=>setEditing(true)} style={ghBtn}>Bearbeiten</button>
+                <button onClick={confirmDelete} style={{background:"none",color:"#6a3a36",border:"1px solid #2a2520",borderRadius:5,padding:"6px 10px",fontSize:12,cursor:"pointer"}}>✕</button></>}
+          </div>
+          {!editing&&note.deadline&&<div style={{padding:"8px 28px",borderBottom:"1px solid #1e1b18",background:dls?.bg||"transparent",flexShrink:0}}>
+            <span style={{fontSize:11,color:dls?.color||"#8a8278"}}>⏱ {new Date(note.deadline).toLocaleDateString("de-DE",{day:"2-digit",month:"long",year:"numeric"})} — {dls?.label}</span>
+          </div>}
+          <NoteEditor
+            note={note} editing={editing}
+            eTitle={eTitle} setETitle={setETitle}
+            eBody={eBody} setEBody={setEBody}
+            eDl={eDl} setEDl={setEDl}
+            showDl={showDl} setShowDl={setShowDl}
+            saving={saving} onSave={saveNote} onCancel={cancelEdit}
+            onEdit={()=>setEditing(true)} onDelete={confirmDelete}
+            onText={onText} onErr={onErr}
+            attachments={attachments} uploading={uploading} err={err} setErr={setErr}
+            onCam={handleCamClick} onImgFile={handleImgFile} onDocFile={handleDocFile} onDelAttach={delAttach}
+            mobile={false} imgRef={imgRef} docRef={docRef} bodyRef={bodyRef}
+            selColor={selColor} getCatLabel={getCatLabel}
+          />
+        </>):(
+          <div style={{flex:1,overflowY:"auto"}}>
+            <DeadlineBoard notes={notes} cats={cats} onOpen={openNote} mobile={false}/>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:12,padding:"40px 24px",color:"#3a3530"}}>
+              <div style={{fontFamily:"'Playfair Display',Georgia,serif",fontSize:40,color:"#2a2520",fontStyle:"italic"}}>—</div>
+              <div style={{fontSize:13}}>{selId?"Notiz auswählen oder + drücken":"Einen Bereich wählen"}</div>
+            </div>
+          </div>
+        )}
+      </main>
+
+      {camOpen&&<div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.95)",zIndex:300,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:20}}>
+        <video ref={vidRef} autoPlay playsInline style={{maxWidth:500,width:"92vw",borderRadius:12,background:"#1a1715"}}/>
+        <div style={{display:"flex",gap:14}}>
+          <button onClick={capturePhoto} style={{background:"#c8a96e",border:"none",borderRadius:10,color:"#0f0e0d",padding:"12px 28px",fontSize:15,cursor:"pointer",fontWeight:700}}>📸 Aufnehmen</button>
+          <button onClick={()=>setCamOpen(false)} style={{background:"none",border:"1px solid #3a3530",borderRadius:10,color:"#8a8278",padding:"12px 20px",fontSize:15,cursor:"pointer"}}>Abbrechen</button>
+        </div>
+      </div>}
+      {newCatModal&&<NewCatSheet cats={cats} parentId={newCatParent} label={newCatLabel} setLabel={setNewCatLabel} onSave={()=>addCat(newCatParent,newCatLabel)} onClose={()=>setNewCatModal(false)}/>}
+      {confirmDel&&<ConfirmDialog msg={confirmDel.msg} onYes={confirmDel.onYes} onNo={()=>setConfirmDel(null)}/>}
+    </div>
+  );
+}
+
+// ── Root ──────────────────────────────────────────────────────────────────────
+function App(){
+  const [user,setUser]=useState(null);
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    sb.auth.getSession().then(({data:{session}})=>{ setUser(session?.user??null); setLoading(false); });
+    const {data:{subscription}}=sb.auth.onAuthStateChange((_,session)=>setUser(session?.user??null));
+    return()=>subscription.unsubscribe();
+  },[]);
+  if(loading)return <div style={{position:"fixed",inset:0,background:"#0f0e0d",display:"flex",alignItems:"center",justifyContent:"center"}}><Spinner/></div>;
+  if(!user)return <LoginScreen/>;
+  return <MainApp user={user}/>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
